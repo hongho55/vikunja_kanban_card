@@ -88,12 +88,17 @@ class VikunjaKanbanCardEditor extends LitElement {
         return false;
     }
 
-    get _due_first() {
+    get _due_sort() {
         if (this.config) {
-            return this.config.due_first || false;
+            if (this.config.due_sort) {
+                return this.config.due_sort;
+            }
+            if (this.config.due_first) {
+                return 'due_first';
+            }
         }
 
-        return false;
+        return '';
     }
 
     get _show_labels() {
@@ -197,9 +202,13 @@ class VikunjaKanbanCardEditor extends LitElement {
         if (e.target.configValue) {
             const configValue = e.target.configValue;
             const sizeFields = ['header_font_size', 'column_font_size', 'card_font_size', 'column_width'];
-            if (e.target.value === '') {
+            const rawValue = e.target.value;
+            const isEmptyString = typeof rawValue === 'string' && rawValue.trim() === '';
+            if (rawValue === undefined || rawValue === null || isEmptyString) {
                 if (!['entity'].includes(configValue)) {
-                    delete this.config[configValue];
+                    const nextConfig = {...this.config};
+                    delete nextConfig[configValue];
+                    this.config = nextConfig;
                 }
             } else {
                 this.config = {
@@ -207,8 +216,8 @@ class VikunjaKanbanCardEditor extends LitElement {
                     [configValue]: e.target.checked !== undefined
                         ? e.target.checked
                         : sizeFields.includes(configValue)
-                            ? e.target.value
-                            : this.isNumeric(e.target.value) ? parseFloat(e.target.value) : e.target.value,
+                            ? rawValue
+                            : this.isNumeric(rawValue) ? parseFloat(rawValue) : rawValue,
                 };
             }
         }
@@ -367,13 +376,19 @@ class VikunjaKanbanCardEditor extends LitElement {
             </div>
 
             <div class="option">
-                <ha-switch
-                    .checked=${(this.config.due_first !== undefined) && (this.config.due_first !== false)}
-                    .configValue=${'due_first'}
-                    @change=${this.valueChanged}
+                <ha-select
+                    naturalMenuWidth
+                    fixedMenuPosition
+                    label="Due sorting"
+                    @selected=${this.valueChanged}
+                    @closed=${(event) => event.stopPropagation()}
+                    .configValue=${'due_sort'}
+                    .value=${this._due_sort}
                 >
-                </ha-switch>
-                <span>Show tasks with due dates first</span>
+                    <mwc-list-item .value="">None</mwc-list-item>
+                    <mwc-list-item .value="due_first">Due first</mwc-list-item>
+                    <mwc-list-item .value="date_asc">Due date (ascending)</mwc-list-item>
+                </ha-select>
             </div>
 
             <div class="option">
@@ -648,14 +663,21 @@ class VikunjaKanbanCard extends LitElement {
         if (!Array.isArray(tasks)) {
             return [];
         }
-        if (!this.config || !this.config.due_first) {
+        const mode = this._getDueSortMode();
+        if (mode === 'none') {
             return tasks;
         }
-        const withIndex = tasks.map((task, index) => ({
-            task,
-            index,
-            hasDue: Boolean(this._taskDueDate(task)),
-        }));
+        const withIndex = tasks.map((task, index) => {
+            const due = this._taskDueDate(task);
+            const timestamp = this._dueTimestamp(due);
+            return {
+                task,
+                index,
+                hasDue: Boolean(due),
+                timestamp,
+            };
+        });
+
         withIndex.sort((a, b) => {
             if (a.hasDue && !b.hasDue) {
                 return -1;
@@ -663,8 +685,14 @@ class VikunjaKanbanCard extends LitElement {
             if (!a.hasDue && b.hasDue) {
                 return 1;
             }
+            if (mode === 'date_asc' && a.hasDue && b.hasDue) {
+                if (a.timestamp !== b.timestamp) {
+                    return a.timestamp - b.timestamp;
+                }
+            }
             return a.index - b.index;
         });
+
         return withIndex.map(item => item.task);
     }
 
@@ -699,6 +727,28 @@ class VikunjaKanbanCard extends LitElement {
         }
         const match = String(value).match(/^\d{4}-\d{2}-\d{2}/);
         return match ? match[0].replace(/-/g, '.') : String(value);
+    }
+
+    _getDueSortMode() {
+        if (!this.config) {
+            return 'none';
+        }
+        const mode = String(this.config.due_sort || '').trim();
+        if (mode) {
+            return mode;
+        }
+        return this.config.due_first ? 'due_first' : 'none';
+    }
+
+    _dueTimestamp(value) {
+        if (!value) {
+            return Number.POSITIVE_INFINITY;
+        }
+        const parsed = Date.parse(value);
+        if (Number.isNaN(parsed)) {
+            return Number.POSITIVE_INFINITY;
+        }
+        return parsed;
     }
 
     _labelColor(label) {
