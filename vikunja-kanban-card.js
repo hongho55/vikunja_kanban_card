@@ -298,8 +298,18 @@ class VikunjaKanbanCard extends LitElement {
     }
 
     _getProjectId(state) {
-        const raw = this.config.project_id !== undefined ? this.config.project_id : state.state;
-        return this._normalizeId(raw);
+        if (this.config.project_id !== undefined && this.config.project_id !== null && this.config.project_id !== '') {
+            return this._normalizeId(this.config.project_id);
+        }
+        if (state && state.attributes) {
+            if (state.attributes.project_id !== undefined && state.attributes.project_id !== null) {
+                return this._normalizeId(state.attributes.project_id);
+            }
+            if (state.attributes.project && state.attributes.project.id !== undefined) {
+                return this._normalizeId(state.attributes.project.id);
+            }
+        }
+        return this._normalizeId(state.state);
     }
 
     _getBuckets(state) {
