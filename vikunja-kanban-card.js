@@ -88,6 +88,46 @@ class VikunjaKanbanCardEditor extends LitElement {
         return false;
     }
 
+    get _header_font_size() {
+        if (this.config) {
+            return this.config.header_font_size || '';
+        }
+
+        return '';
+    }
+
+    get _column_font_size() {
+        if (this.config) {
+            return this.config.column_font_size || '';
+        }
+
+        return '';
+    }
+
+    get _card_font_size() {
+        if (this.config) {
+            return this.config.card_font_size || '';
+        }
+
+        return '';
+    }
+
+    get _column_width() {
+        if (this.config) {
+            return this.config.column_width || '';
+        }
+
+        return '';
+    }
+
+    get _enable_drag() {
+        if (this.config) {
+            return (this.config.enable_drag === undefined) || (this.config.enable_drag !== false);
+        }
+
+        return true;
+    }
+
     setConfig(config) {
         this.config = config;
     }
@@ -123,16 +163,20 @@ class VikunjaKanbanCardEditor extends LitElement {
         }
 
         if (e.target.configValue) {
+            const configValue = e.target.configValue;
+            const sizeFields = ['header_font_size', 'column_font_size', 'card_font_size', 'column_width'];
             if (e.target.value === '') {
-                if (!['entity'].includes(e.target.configValue)) {
-                    delete this.config[e.target.configValue];
+                if (!['entity'].includes(configValue)) {
+                    delete this.config[configValue];
                 }
             } else {
                 this.config = {
                     ...this.config,
-                    [e.target.configValue]: e.target.checked !== undefined
+                    [configValue]: e.target.checked !== undefined
                         ? e.target.checked
-                        : this.isNumeric(e.target.value) ? parseFloat(e.target.value) : e.target.value,
+                        : sizeFields.includes(configValue)
+                            ? e.target.value
+                            : this.isNumeric(e.target.value) ? parseFloat(e.target.value) : e.target.value,
                 };
             }
         }
@@ -187,6 +231,42 @@ class VikunjaKanbanCardEditor extends LitElement {
                     label="View ID (optional)"
                     .configValue=${'view_id'}
                     .value=${this._view_id}
+                    @input=${this.valueChanged}
+                ></ha-textfield>
+            </div>
+
+            <div class="option">
+                <ha-textfield
+                    label="Header font size (optional)"
+                    .configValue=${'header_font_size'}
+                    .value=${this._header_font_size}
+                    @input=${this.valueChanged}
+                ></ha-textfield>
+            </div>
+
+            <div class="option">
+                <ha-textfield
+                    label="Column font size (optional)"
+                    .configValue=${'column_font_size'}
+                    .value=${this._column_font_size}
+                    @input=${this.valueChanged}
+                ></ha-textfield>
+            </div>
+
+            <div class="option">
+                <ha-textfield
+                    label="Card font size (optional)"
+                    .configValue=${'card_font_size'}
+                    .value=${this._card_font_size}
+                    @input=${this.valueChanged}
+                ></ha-textfield>
+            </div>
+
+            <div class="option">
+                <ha-textfield
+                    label="Column width (optional)"
+                    .configValue=${'column_width'}
+                    .value=${this._column_width}
                     @input=${this.valueChanged}
                 ></ha-textfield>
             </div>
@@ -253,6 +333,16 @@ class VikunjaKanbanCardEditor extends LitElement {
                 </ha-switch>
                 <span>Only show today or overdue</span>
             </div>
+
+            <div class="option">
+                <ha-switch
+                    .checked=${this._enable_drag}
+                    .configValue=${'enable_drag'}
+                    @change=${this.valueChanged}
+                >
+                </ha-switch>
+                <span>Enable drag and drop</span>
+            </div>
         </div>`;
     }
 
@@ -281,6 +371,11 @@ class VikunjaKanbanCard extends LitElement {
         super();
 
         this._useDarkTheme = VikunjaKanbanCard.isDarkTheme();
+        this._htmlDragActive = false;
+        this._pointerDrag = null;
+        this._boundPointerMove = this._onPointerMove.bind(this);
+        this._boundPointerUp = this._onPointerUp.bind(this);
+        this._boundPointerCancel = this._onPointerCancel.bind(this);
     }
 
     static get properties() {
@@ -312,6 +407,35 @@ class VikunjaKanbanCard extends LitElement {
         }
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : value;
+    }
+
+    _resolveCssSize(value) {
+        if (value === undefined || value === null || value === '') {
+            return null;
+        }
+        if (typeof value === 'number') {
+            return `${value}px`;
+        }
+        const trimmed = String(value).trim();
+        if (!trimmed) {
+            return null;
+        }
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? `${parsed}px` : trimmed;
+    }
+
+    _styleString(styleMap) {
+        return Object.entries(styleMap)
+            .filter(([, value]) => value)
+            .map(([key, value]) => `${key}: ${value};`)
+            .join(' ');
+    }
+
+    _dragEnabled() {
+        if (!this.config) {
+            return true;
+        }
+        return (this.config.enable_drag === undefined) || (this.config.enable_drag !== false);
     }
 
     _getProjectId(state) {
@@ -433,6 +557,168 @@ class VikunjaKanbanCard extends LitElement {
         });
     }
 
+    _moveTask(taskId, targetBucketId, state) {
+        const stateObj = state || (this.hass && this.hass.states[this.config.entity]);
+        if (!stateObj || !taskId || !targetBucketId) {
+            return;
+        }
+
+        const projectId = this._getProjectId(stateObj);
+        const viewId = this._getViewId(stateObj);
+        const payload = {bucket_id: targetBucketId};
+        let moveRequest;
+
+        if (projectId && viewId) {
+            moveRequest = this._callVikunja(
+                'POST',
+                `/projects/${projectId}/views/${viewId}/buckets/${targetBucketId}/tasks`,
+                {task_id: taskId},
+            ).catch(() => this._callVikunja('POST', `/tasks/${taskId}`, payload));
+        } else {
+            moveRequest = this._callVikunja('POST', `/tasks/${taskId}`, payload);
+        }
+
+        moveRequest
+            .then(() => this._refreshEntity())
+            .finally(() => {
+                this.requestUpdate();
+            });
+    }
+
+    _onDragStart(task, event) {
+        if (!this._dragEnabled()) {
+            return;
+        }
+        const taskId = this._normalizeId(task.id);
+        if (!taskId) {
+            event.preventDefault();
+            return;
+        }
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', String(taskId));
+        this._htmlDragActive = true;
+    }
+
+    _onDragEnd() {
+        this._htmlDragActive = false;
+    }
+
+    _onDragOver(event) {
+        if (!this._dragEnabled()) {
+            return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+    }
+
+    _onDrop(bucket, event) {
+        if (!this._dragEnabled()) {
+            return;
+        }
+        event.preventDefault();
+        const taskId = this._normalizeId(event.dataTransfer.getData('text/plain'));
+        if (!taskId || !bucket || !bucket.id) {
+            return;
+        }
+        const state = this.hass.states[this.config.entity] || undefined;
+        if (!state) {
+            return;
+        }
+        const tasks = this._getTasks();
+        const task = tasks.find(item => this._normalizeId(item.id) == taskId);
+        const currentBucketId = task ? this._normalizeId(task.bucket_id ?? task.section_id) : null;
+        if (currentBucketId !== null && currentBucketId == bucket.id) {
+            return;
+        }
+        this._moveTask(taskId, bucket.id, state);
+    }
+
+    _onPointerDown(task, event) {
+        if (!this._dragEnabled() || this._htmlDragActive) {
+            return;
+        }
+        if (event.pointerType === 'mouse' && event.button !== 0) {
+            return;
+        }
+        const taskId = this._normalizeId(task.id);
+        if (!taskId) {
+            return;
+        }
+        this._pointerDrag = {
+            taskId,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            active: false,
+        };
+        window.addEventListener('pointermove', this._boundPointerMove);
+        window.addEventListener('pointerup', this._boundPointerUp);
+        window.addEventListener('pointercancel', this._boundPointerCancel);
+    }
+
+    _onPointerMove(event) {
+        if (!this._pointerDrag || event.pointerId !== this._pointerDrag.pointerId) {
+            return;
+        }
+        const dx = event.clientX - this._pointerDrag.startX;
+        const dy = event.clientY - this._pointerDrag.startY;
+        if (Math.hypot(dx, dy) > 6) {
+            this._pointerDrag.active = true;
+        }
+    }
+
+    _onPointerUp(event) {
+        if (!this._pointerDrag || event.pointerId !== this._pointerDrag.pointerId) {
+            return;
+        }
+        const pointerDrag = this._pointerDrag;
+        this._pointerDrag = null;
+        window.removeEventListener('pointermove', this._boundPointerMove);
+        window.removeEventListener('pointerup', this._boundPointerUp);
+        window.removeEventListener('pointercancel', this._boundPointerCancel);
+        if (!pointerDrag.active || this._htmlDragActive) {
+            return;
+        }
+        const bucketId = this._getBucketIdFromPoint(event.clientX, event.clientY);
+        if (!bucketId) {
+            return;
+        }
+        const state = this.hass.states[this.config.entity] || undefined;
+        if (!state) {
+            return;
+        }
+        const tasks = this._getTasks();
+        const task = tasks.find(item => this._normalizeId(item.id) == pointerDrag.taskId);
+        const currentBucketId = task ? this._normalizeId(task.bucket_id ?? task.section_id) : null;
+        if (currentBucketId !== null && currentBucketId == bucketId) {
+            return;
+        }
+        this._moveTask(pointerDrag.taskId, bucketId, state);
+    }
+
+    _onPointerCancel(event) {
+        if (!this._pointerDrag || event.pointerId !== this._pointerDrag.pointerId) {
+            return;
+        }
+        this._pointerDrag = null;
+        window.removeEventListener('pointermove', this._boundPointerMove);
+        window.removeEventListener('pointerup', this._boundPointerUp);
+        window.removeEventListener('pointercancel', this._boundPointerCancel);
+    }
+
+    _getBucketIdFromPoint(x, y) {
+        const root = this.shadowRoot;
+        if (!root || !root.elementFromPoint) {
+            return null;
+        }
+        const el = root.elementFromPoint(x, y);
+        const bucketEl = el && el.closest ? el.closest('.kanban-block') : null;
+        if (!bucketEl || !bucketEl.dataset || !bucketEl.dataset.bucketId) {
+            return null;
+        }
+        return this._normalizeId(bucketEl.dataset.bucketId);
+    }
+
     itemAdd() {
         const input = this.shadowRoot.getElementById('vikunja-card-item-add');
         const state = this.hass.states[this.config.entity] || undefined;
@@ -488,7 +774,7 @@ class VikunjaKanbanCard extends LitElement {
     itemMove(task, direction, buckets) {
         const state = this.hass.states[this.config.entity] || undefined;
         const taskId = this._normalizeId(task.id);
-        if (!taskId || !buckets.length) {
+        if (!state || !taskId || !buckets.length) {
             return;
         }
 
@@ -504,26 +790,7 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         const targetBucket = buckets[targetIndex];
-        const payload = {bucket_id: targetBucket.id};
-        const projectId = this._getProjectId(state);
-        const viewId = this._getViewId(state);
-        let moveRequest;
-
-        if (projectId && viewId) {
-            moveRequest = this._callVikunja(
-                'POST',
-                `/projects/${projectId}/views/${viewId}/buckets/${targetBucket.id}/tasks`,
-                {task_id: taskId},
-            ).catch(() => this._callVikunja('POST', `/tasks/${taskId}`, payload));
-        } else {
-            moveRequest = this._callVikunja('POST', `/tasks/${taskId}`, payload);
-        }
-
-        moveRequest
-            .then(() => this._refreshEntity())
-            .finally(() => {
-                this.requestUpdate();
-            });
+        this._moveTask(taskId, targetBucket.id, state);
     }
 
     render() {
@@ -571,21 +838,39 @@ class VikunjaKanbanCard extends LitElement {
         });
 
         const showHeader = this.config.show_header ?? true;
+        const enableDrag = this._dragEnabled();
+        const styleString = this._styleString({
+            '--vkc-header-font-size': this._resolveCssSize(this.config.header_font_size),
+            '--vkc-column-font-size': this._resolveCssSize(this.config.column_font_size),
+            '--vkc-card-font-size': this._resolveCssSize(this.config.card_font_size),
+            '--vkc-column-width': this._resolveCssSize(this.config.column_width),
+        });
 
-        return html`<ha-card class="${showHeader ? 'has-header' : ''} ${this._useDarkTheme ? 'dark': ''}">
+        return html`<ha-card class="${showHeader ? 'has-header' : ''} ${this._useDarkTheme ? 'dark': ''}" style="${styleString}">
             <div class="container">
                 ${showHeader ? html`<h1 class="kanban-heading">${state.attributes.friendly_name}</h1>` : html``}
 
                 <div class="kanban-board">
                     ${buckets.map((bucket, index) => html`
-                        <div class="kanban-block ${index === buckets.length - 1 ? 'last' : ''}">
+                        <div
+                            class="kanban-block ${index === buckets.length - 1 ? 'last' : ''}"
+                            data-bucket-id="${bucket.id}"
+                            @dragover=${this._onDragOver}
+                            @drop=${(event) => this._onDrop(bucket, event)}
+                        >
                             <strong>${bucket.title}</strong>
-                            <div class="vikunja-list">
+                            <div class="vikunja-list" @dragover=${this._onDragOver} @drop=${(event) => this._onDrop(bucket, event)}>
                                 ${bucket.items.map(task => {
                                     const title = this._taskTitle(task);
                                     const description = this._taskDescription(task);
                                     return html`
-                                        <div class="card">
+                                        <div
+                                            class="card"
+                                            .draggable=${enableDrag}
+                                            @dragstart=${(event) => this._onDragStart(task, event)}
+                                            @dragend=${this._onDragEnd}
+                                            @pointerdown=${(event) => this._onPointerDown(task, event)}
+                                        >
                                             ${description
                                                 ? html`<div class="card-content">
                                                     <span class="vikunja-item-content">${title}</span>
@@ -670,7 +955,7 @@ class VikunjaKanbanCard extends LitElement {
         .kanban-heading {
             text-align: center;
             font-family: Arial, sans-serif;
-            font-size: 32px;
+            font-size: var(--vkc-header-font-size, 32px);
             color: var(--ha-card-header-color,--primary-text-color);
             margin-bottom: 16px;
         }
@@ -679,16 +964,17 @@ class VikunjaKanbanCard extends LitElement {
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
+            overflow-x: auto;
         }
 
         .kanban-block {
-            width: 100%;
+            width: var(--vkc-column-width, 100%);
             margin-right: 16px;
             border: 1px solid var(--secondary-background-color);
             border-radius: 10px;
             overflow-y: auto;
             font-family: Arial, sans-serif;
-            font-size: 18px;
+            font-size: var(--vkc-column-font-size, 18px);
             color: var(--ha-card-header-color,--primary-text-color);
             display: flex;
             flex-direction: column;
@@ -743,6 +1029,7 @@ class VikunjaKanbanCard extends LitElement {
             display: flex;
             flex-direction: row;
             align-items: center;
+            font-size: var(--vkc-card-font-size, inherit);
         }
 
         .dark .card {
