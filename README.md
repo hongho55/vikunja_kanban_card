@@ -102,6 +102,7 @@ show_item_delete: true
 ## Actions
 
 - Drag and drop: move the task between columns.
+- Checkbox: mark the task as done or reopen it.
 - Cross: delete the selected task from Vikunja.
 - Input: add a new task using the input row.
 

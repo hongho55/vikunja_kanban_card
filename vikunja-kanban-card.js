@@ -607,6 +607,23 @@ class VikunjaKanbanCard extends LitElement {
         return null;
     }
 
+    _getDoneBucketId(state) {
+        if (!state || !state.attributes) {
+            return null;
+        }
+        const attrs = state.attributes;
+        if (attrs.done_bucket_id !== undefined && attrs.done_bucket_id !== null) {
+            return this._normalizeId(attrs.done_bucket_id);
+        }
+        if (attrs.view && attrs.view.done_bucket_id !== undefined) {
+            return this._normalizeId(attrs.view.done_bucket_id);
+        }
+        if (attrs.view && attrs.view.done_bucket && attrs.view.done_bucket.id !== undefined) {
+            return this._normalizeId(attrs.view.done_bucket.id);
+        }
+        return null;
+    }
+
     _getBuckets(state) {
         const rawBuckets = state.attributes.buckets || state.attributes.sections || [];
         return rawBuckets.map((bucket, index) => {
@@ -1095,26 +1112,24 @@ class VikunjaKanbanCard extends LitElement {
             });
     }
 
-    itemMove(task, direction, buckets) {
+    _setTaskDone(task, done) {
         const state = this.hass.states[this.config.entity] || undefined;
         const taskId = this._normalizeId(task.id);
-        if (!state || !taskId || !buckets.length) {
+        if (!state || !taskId) {
             return;
         }
-
-        const currentBucketId = this._normalizeId(task.bucket_id ?? task.section_id);
-        const currentIndex = buckets.findIndex(bucket => bucket.id == currentBucketId);
-        if (currentIndex < 0) {
-            return;
-        }
-
-        const targetIndex = direction === 'right' ? currentIndex + 1 : currentIndex - 1;
-        if (targetIndex < 0 || targetIndex >= buckets.length) {
-            return;
-        }
-
-        const targetBucket = buckets[targetIndex];
-        this._moveTask(taskId, targetBucket.id, state);
+        const doneBucketId = done ? this._getDoneBucketId(state) : null;
+        this._callVikunja('POST', `/tasks/${taskId}`, {done: !!done})
+            .then(() => {
+                if (doneBucketId) {
+                    this._moveTask(taskId, doneBucketId, state);
+                    return null;
+                }
+                return this._refreshEntity();
+            })
+            .finally(() => {
+                this.requestUpdate();
+            });
     }
 
     render() {
@@ -1228,18 +1243,13 @@ class VikunjaKanbanCard extends LitElement {
                                                 </div>`
                                                 : html``}
                                             </div>
-                                            ${index > 0
-                                                ? html`<ha-icon-button @click=${() => this.itemMove(task, 'left', buckets)}>
-                                                        <ha-icon icon="mdi:arrow-left">
-                                                        </ha-icon>
-                                                    </ha-icon-button>`
-                                                : html``}
-                                            ${index < buckets.length - 1
-                                                ? html`<ha-icon-button @click=${() => this.itemMove(task, 'right', buckets)}>
-                                                        <ha-icon icon="mdi:arrow-right">
-                                                        </ha-icon>
-                                                    </ha-icon-button>`
-                                                : html``}
+                                            <div class="card-actions">
+                                                <ha-checkbox
+                                                    class="vikunja-item-done"
+                                                    .checked=${task.done === true}
+                                                    @change=${(event) => this._setTaskDone(task, event.target.checked)}
+                                                    @pointerdown=${(event) => event.stopPropagation()}
+                                                ></ha-checkbox>
                                             ${index === buckets.length - 1 && ((this.config.show_item_delete === undefined) || (this.config.show_item_delete !== false))
                                                 ? html`<ha-icon-button
                                                             class="vikunja-item-delete"
@@ -1247,6 +1257,7 @@ class VikunjaKanbanCard extends LitElement {
                                                             <ha-icon icon="mdi:close"></ha-icon>
                                                         </ha-icon-button>`
                                                 : html``}
+                                            </div>
                                         </div>
                                     `;
                                 })}
@@ -1392,6 +1403,16 @@ class VikunjaKanbanCard extends LitElement {
             display: flex;
             flex-direction: column;
             gap: 2px;
+        }
+
+        .card-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .vikunja-item-done {
+            margin-left: 4px;
         }
 
         .vikunja-item-description {
