@@ -1572,7 +1572,11 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         .vikunja-item-done {
-            margin-right: 6px;
+            margin-right: 4px;
+            flex: 0 0 auto;
+            --mdc-checkbox-size: 16px;
+            --mdc-checkbox-state-layer-size: 20px;
+            --mdc-checkbox-touch-target-size: 20px;
         }
 
         .card-actions {
