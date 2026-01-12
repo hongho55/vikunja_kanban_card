@@ -72,12 +72,16 @@ class VikunjaKanbanCardEditor extends LitElement {
         return true;
     }
 
-    get _show_item_delete() {
+    get _item_action() {
         if (this.config) {
-            return this.config.show_item_delete ?? true;
+            if (this.config.item_action) {
+                return this.config.item_action;
+            }
+            if (this.config.show_item_delete !== undefined) {
+                return this.config.show_item_delete ? 'delete' : 'done';
+            }
         }
-
-        return true;
+        return 'done';
     }
 
     get _only_today_overdue() {
@@ -376,18 +380,18 @@ class VikunjaKanbanCardEditor extends LitElement {
             </div>
 
             <div class="option">
-                <ha-switch
-                    .checked=${(this.config.show_item_delete === undefined) || (this.config.show_item_delete !== false)}
-                    .configValue=${'show_item_delete'}
-                    @change=${this.valueChanged}
+                <ha-select
+                    naturalMenuWidth
+                    fixedMenuPosition
+                    label="Item action"
+                    @selected=${this.valueChanged}
+                    @closed=${(event) => event.stopPropagation()}
+                    .configValue=${'item_action'}
+                    .value=${this._item_action}
                 >
-                </ha-switch>
-                <span>Show "delete" buttons</span>
-            </div>
-            <div class="option" style="font-size: 0.7rem; margin: -12px 0 0 45px">
-                <span>
-                    * Only shown in the last column.
-                </span>
+                    <mwc-list-item value="done">Checkbox (done)</mwc-list-item>
+                    <mwc-list-item value="delete">Delete button (last column)</mwc-list-item>
+                </ha-select>
             </div>
 
             <div class="option">
@@ -510,6 +514,7 @@ class VikunjaKanbanCard extends LitElement {
         this._lastEntityUpdated = null;
         this._lastEntityId = null;
         this._refreshTimer = null;
+        this._optimisticTtlMs = 8000;
     }
 
     static get properties() {
@@ -552,9 +557,7 @@ class VikunjaKanbanCard extends LitElement {
                 const stamp = state?.last_updated || state?.last_changed || null;
                 if (stamp && stamp !== this._lastEntityUpdated) {
                     this._lastEntityUpdated = stamp;
-                    if (this._optimisticTasks && this._optimisticTasks.size) {
-                        this._optimisticTasks.clear();
-                    }
+                    this._reconcileOptimistic(state);
                 }
             }
         }
@@ -631,6 +634,16 @@ class VikunjaKanbanCard extends LitElement {
         return null;
     }
 
+    _getItemAction() {
+        if (this.config && this.config.item_action) {
+            return this.config.item_action;
+        }
+        if (this.config && this.config.show_item_delete !== undefined) {
+            return this.config.show_item_delete ? 'delete' : 'done';
+        }
+        return 'done';
+    }
+
     _getDoneBucketId(state) {
         if (!state || !state.attributes) {
             return null;
@@ -680,18 +693,27 @@ class VikunjaKanbanCard extends LitElement {
         return tasks;
     }
 
+    _getRawTasks(state) {
+        const stateObj = state || this.hass.states[this.config.entity] || undefined;
+        if (!stateObj) {
+            return [];
+        }
+
+        let tasks = stateObj.attributes.tasks || stateObj.attributes.items || [];
+        if (!Array.isArray(tasks) || tasks.length === 0) {
+            const buckets = this._getBuckets(stateObj);
+            tasks = this._getTasksFromBuckets(buckets);
+        }
+        return Array.isArray(tasks) ? tasks : [];
+    }
+
     _getTasks() {
         const state = this.hass.states[this.config.entity] || undefined;
         if (!state) {
             return [];
         }
 
-        let tasks = state.attributes.tasks || state.attributes.items || [];
-        if (!Array.isArray(tasks) || tasks.length === 0) {
-            const buckets = this._getBuckets(state);
-            tasks = this._getTasksFromBuckets(buckets);
-        }
-        const normalized = Array.isArray(tasks) ? tasks : [];
+        const normalized = this._getRawTasks(state);
         return this._applyOptimisticTasks(normalized);
     }
 
@@ -699,6 +721,7 @@ class VikunjaKanbanCard extends LitElement {
         if (!Array.isArray(tasks) || !this._optimisticTasks || this._optimisticTasks.size === 0) {
             return tasks;
         }
+        const now = Date.now();
         const updated = [];
         for (const task of tasks) {
             const taskId = this._normalizeId(task.id);
@@ -706,7 +729,11 @@ class VikunjaKanbanCard extends LitElement {
                 updated.push(task);
                 continue;
             }
-            const override = this._optimisticTasks.get(taskId);
+            let override = this._optimisticTasks.get(taskId);
+            if (override && override.updatedAt && now - override.updatedAt > this._optimisticTtlMs) {
+                this._optimisticTasks.delete(taskId);
+                override = null;
+            }
             if (!override) {
                 updated.push(task);
                 continue;
@@ -731,7 +758,55 @@ class VikunjaKanbanCard extends LitElement {
             this._optimisticTasks = new Map();
         }
         const existing = this._optimisticTasks.get(taskId) || {};
-        this._optimisticTasks.set(taskId, {...existing, ...updates});
+        this._optimisticTasks.set(taskId, {
+            ...existing,
+            ...updates,
+            updatedAt: Date.now(),
+        });
+    }
+
+    _reconcileOptimistic(state) {
+        if (!this._optimisticTasks || this._optimisticTasks.size === 0 || !state) {
+            return;
+        }
+        const now = Date.now();
+        const tasks = this._getRawTasks(state);
+        const taskMap = new Map();
+        for (const task of tasks) {
+            const taskId = this._normalizeId(task.id);
+            if (taskId) {
+                taskMap.set(taskId, task);
+            }
+        }
+        for (const [taskId, override] of this._optimisticTasks.entries()) {
+            if (override.updatedAt && now - override.updatedAt > this._optimisticTtlMs) {
+                this._optimisticTasks.delete(taskId);
+                continue;
+            }
+            const task = taskMap.get(taskId);
+            if (override.deleted) {
+                if (!task) {
+                    this._optimisticTasks.delete(taskId);
+                }
+                continue;
+            }
+            if (!task) {
+                continue;
+            }
+            let matched = true;
+            if (override.bucket_id !== undefined) {
+                const currentBucketId = this._normalizeId(task.bucket_id ?? task.section_id);
+                if (currentBucketId != override.bucket_id) {
+                    matched = false;
+                }
+            }
+            if (override.done !== undefined && Boolean(task.done) !== Boolean(override.done)) {
+                matched = false;
+            }
+            if (matched) {
+                this._optimisticTasks.delete(taskId);
+            }
+        }
     }
 
     _queueRefresh() {
@@ -742,6 +817,22 @@ class VikunjaKanbanCard extends LitElement {
             this._refreshTimer = null;
             this._refreshEntity();
         }, 500);
+    }
+
+    itemDelete(task) {
+        const taskId = this._normalizeId(task.id);
+        if (!taskId) {
+            return;
+        }
+
+        this._setOptimisticTask(taskId, {deleted: true});
+        this.requestUpdate();
+
+        this._callVikunja('DELETE', `/tasks/${taskId}`)
+            .finally(() => {
+                this._queueRefresh();
+                this.requestUpdate();
+            });
     }
 
     _parseLabelFilter(value) {
@@ -1177,22 +1268,6 @@ class VikunjaKanbanCard extends LitElement {
         }
     }
 
-    itemDelete(task) {
-        const taskId = this._normalizeId(task.id);
-        if (!taskId) {
-            return;
-        }
-
-        this._setOptimisticTask(taskId, {deleted: true});
-        this.requestUpdate();
-
-        this._callVikunja('DELETE', `/tasks/${taskId}`)
-            .finally(() => {
-                this._queueRefresh();
-                this.requestUpdate();
-            });
-    }
-
     _setTaskDone(task, done) {
         const state = this.hass.states[this.config.entity] || undefined;
         const taskId = this._normalizeId(task.id);
@@ -1272,6 +1347,7 @@ class VikunjaKanbanCard extends LitElement {
         const showHeader = this.config.show_header ?? true;
         const enableDrag = this._dragEnabled();
         const showLabels = (this.config.show_labels === undefined) || (this.config.show_labels !== false);
+        const itemAction = this._getItemAction();
         const styleString = this._styleString({
             '--vkc-header-font-size': this._resolveCssSize(this.config.header_font_size),
             '--vkc-column-font-size': this._resolveCssSize(this.config.column_font_size),
@@ -1312,6 +1388,14 @@ class VikunjaKanbanCard extends LitElement {
                                             @dragend=${this._onDragEnd}
                                             @pointerdown=${(event) => this._onPointerDown(task, event)}
                                         >
+                                            ${itemAction === 'done'
+                                                ? html`<ha-checkbox
+                                                            class="vikunja-item-done"
+                                                            .checked=${task.done === true}
+                                                            @change=${(event) => this._setTaskDone(task, event.target.checked)}
+                                                            @pointerdown=${(event) => event.stopPropagation()}
+                                                        ></ha-checkbox>`
+                                                : html``}
                                             <div class="card-content">
                                                 <span class="vikunja-item-content">${title}</span>
                                                 ${description
@@ -1330,21 +1414,15 @@ class VikunjaKanbanCard extends LitElement {
                                                 </div>`
                                                 : html``}
                                             </div>
-                                            <div class="card-actions">
-                                                <ha-checkbox
-                                                    class="vikunja-item-done"
-                                                    .checked=${task.done === true}
-                                                    @change=${(event) => this._setTaskDone(task, event.target.checked)}
-                                                    @pointerdown=${(event) => event.stopPropagation()}
-                                                ></ha-checkbox>
-                                            ${index === buckets.length - 1 && ((this.config.show_item_delete === undefined) || (this.config.show_item_delete !== false))
-                                                ? html`<ha-icon-button
-                                                            class="vikunja-item-delete"
-                                                            @click=${() => this.itemDelete(task)}>
-                                                            <ha-icon icon="mdi:close"></ha-icon>
-                                                        </ha-icon-button>`
+                                            ${itemAction === 'delete' && index === buckets.length - 1
+                                                ? html`<div class="card-actions">
+                                                            <ha-icon-button
+                                                                class="vikunja-item-delete"
+                                                                @click=${() => this.itemDelete(task)}>
+                                                                <ha-icon icon="mdi:close"></ha-icon>
+                                                            </ha-icon-button>
+                                                        </div>`
                                                 : html``}
-                                            </div>
                                         </div>
                                     `;
                                 })}
@@ -1486,20 +1564,23 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         .card-content {
-            width: 100%;
             display: flex;
             flex-direction: column;
             gap: 2px;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        .vikunja-item-done {
+            margin-right: 6px;
         }
 
         .card-actions {
             display: flex;
             align-items: center;
             gap: 4px;
-        }
-
-        .vikunja-item-done {
-            margin-left: 4px;
+            flex: 0 0 auto;
+            margin-left: auto;
         }
 
         .vikunja-item-description {

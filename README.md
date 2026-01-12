@@ -68,7 +68,7 @@ entity: sensor.vikunja_board
 project_id: 1
 show_header: true
 show_item_add: true
-show_item_delete: true
+item_action: done
 ```
 
 ### Options
@@ -88,7 +88,7 @@ show_item_delete: true
 | `service_name`       | `string`  | `call_api`   | Service name for API calls.
 | `show_header`        | `boolean` | `true`       | Show friendly name of the selected sensor in the card header.
 | `show_item_add`      | `boolean` | `true`       | Show text input for adding new tasks. Only shown in the first column.
-| `show_item_delete`   | `boolean` | `true`       | Show delete buttons. Only shown in the last column.
+| `item_action`        | `string`  | `done`       | Task action: `done` (checkbox) or `delete` (delete button in last column).
 | `only_today_overdue` | `boolean` | `false`      | Only show tasks that are overdue or due today.
 | `due_sort`           | `string`  | optional     | Due date sorting: `none`, `due_first`, `date_asc`.
 | `due_first`          | `boolean` | `false`      | Legacy option. Use `due_sort: due_first` instead.
@@ -102,8 +102,8 @@ show_item_delete: true
 ## Actions
 
 - Drag and drop: move the task between columns.
-- Checkbox: mark the task as done or reopen it.
-- Cross: delete the selected task from Vikunja.
+- Checkbox (when `item_action: done`): mark the task as done or reopen it.
+- Delete button (when `item_action: delete`): remove the task from the last column.
 - Input: add a new task using the input row.
 
 ## License
