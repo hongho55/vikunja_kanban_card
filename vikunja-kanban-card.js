@@ -506,6 +506,10 @@ class VikunjaKanbanCard extends LitElement {
         this._boundPointerMove = this._onPointerMove.bind(this);
         this._boundPointerUp = this._onPointerUp.bind(this);
         this._boundPointerCancel = this._onPointerCancel.bind(this);
+        this._optimisticTasks = new Map();
+        this._lastEntityUpdated = null;
+        this._lastEntityId = null;
+        this._refreshTimer = null;
     }
 
     static get properties() {
@@ -525,6 +529,9 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         this.config = config;
+        this._lastEntityId = config.entity;
+        this._lastEntityUpdated = null;
+        this._optimisticTasks = new Map();
     }
 
     updated(changedProperties) {
@@ -533,6 +540,23 @@ class VikunjaKanbanCard extends LitElement {
             this._useDarkTheme = hassDark === undefined
                 ? VikunjaKanbanCard.isDarkTheme()
                 : hassDark;
+
+            const entityId = this.config?.entity;
+            if (entityId) {
+                if (this._lastEntityId && this._lastEntityId !== entityId) {
+                    this._lastEntityId = entityId;
+                    this._lastEntityUpdated = null;
+                    this._optimisticTasks = new Map();
+                }
+                const state = this.hass?.states?.[entityId];
+                const stamp = state?.last_updated || state?.last_changed || null;
+                if (stamp && stamp !== this._lastEntityUpdated) {
+                    this._lastEntityUpdated = stamp;
+                    if (this._optimisticTasks && this._optimisticTasks.size) {
+                        this._optimisticTasks.clear();
+                    }
+                }
+            }
         }
     }
 
@@ -667,7 +691,57 @@ class VikunjaKanbanCard extends LitElement {
             const buckets = this._getBuckets(state);
             tasks = this._getTasksFromBuckets(buckets);
         }
-        return Array.isArray(tasks) ? tasks : [];
+        const normalized = Array.isArray(tasks) ? tasks : [];
+        return this._applyOptimisticTasks(normalized);
+    }
+
+    _applyOptimisticTasks(tasks) {
+        if (!Array.isArray(tasks) || !this._optimisticTasks || this._optimisticTasks.size === 0) {
+            return tasks;
+        }
+        const updated = [];
+        for (const task of tasks) {
+            const taskId = this._normalizeId(task.id);
+            if (!taskId) {
+                updated.push(task);
+                continue;
+            }
+            const override = this._optimisticTasks.get(taskId);
+            if (!override) {
+                updated.push(task);
+                continue;
+            }
+            if (override.deleted) {
+                continue;
+            }
+            updated.push({
+                ...task,
+                ...(override.bucket_id !== undefined ? {bucket_id: override.bucket_id} : {}),
+                ...(override.done !== undefined ? {done: override.done} : {}),
+            });
+        }
+        return updated;
+    }
+
+    _setOptimisticTask(taskId, updates) {
+        if (!taskId) {
+            return;
+        }
+        if (!this._optimisticTasks) {
+            this._optimisticTasks = new Map();
+        }
+        const existing = this._optimisticTasks.get(taskId) || {};
+        this._optimisticTasks.set(taskId, {...existing, ...updates});
+    }
+
+    _queueRefresh() {
+        if (this._refreshTimer) {
+            clearTimeout(this._refreshTimer);
+        }
+        this._refreshTimer = setTimeout(() => {
+            this._refreshTimer = null;
+            this._refreshEntity();
+        }, 500);
     }
 
     _parseLabelFilter(value) {
@@ -901,6 +975,9 @@ class VikunjaKanbanCard extends LitElement {
             return;
         }
 
+        this._setOptimisticTask(taskId, {bucket_id: targetBucketId});
+        this.requestUpdate();
+
         const projectId = this._getProjectId(stateObj);
         const viewId = this._getViewId(stateObj);
         const payload = {bucket_id: targetBucketId};
@@ -917,10 +994,11 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         moveRequest
-            .then(() => this._refreshEntity())
             .finally(() => {
+                this._queueRefresh();
                 this.requestUpdate();
             });
+        return moveRequest;
     }
 
     _onDragStart(task, event) {
@@ -1086,9 +1164,9 @@ class VikunjaKanbanCard extends LitElement {
         this._callVikunja('PUT', `/projects/${projectId}/tasks`, payload)
             .then(() => {
                 input.value = '';
-                return this._refreshEntity();
             })
             .finally(() => {
+                this._queueRefresh();
                 this.requestUpdate();
             });
     }
@@ -1105,9 +1183,12 @@ class VikunjaKanbanCard extends LitElement {
             return;
         }
 
+        this._setOptimisticTask(taskId, {deleted: true});
+        this.requestUpdate();
+
         this._callVikunja('DELETE', `/tasks/${taskId}`)
-            .then(() => this._refreshEntity())
             .finally(() => {
+                this._queueRefresh();
                 this.requestUpdate();
             });
     }
@@ -1119,15 +1200,23 @@ class VikunjaKanbanCard extends LitElement {
             return;
         }
         const doneBucketId = done ? this._getDoneBucketId(state) : null;
-        this._callVikunja('POST', `/tasks/${taskId}`, {done: !!done})
+        const optimisticUpdate = {done: !!done};
+        if (doneBucketId) {
+            optimisticUpdate.bucket_id = doneBucketId;
+        }
+        this._setOptimisticTask(taskId, optimisticUpdate);
+        this.requestUpdate();
+
+        const doneRequest = this._callVikunja('POST', `/tasks/${taskId}`, {done: !!done});
+        doneRequest
             .then(() => {
                 if (doneBucketId) {
-                    this._moveTask(taskId, doneBucketId, state);
-                    return null;
+                    return this._moveTask(taskId, doneBucketId, state);
                 }
-                return this._refreshEntity();
+                return null;
             })
             .finally(() => {
+                this._queueRefresh();
                 this.requestUpdate();
             });
     }
@@ -1172,9 +1261,7 @@ class VikunjaKanbanCard extends LitElement {
         }
 
         buckets = buckets.map(bucket => {
-            const bucketTasks = bucket.tasks
-                ? bucket.tasks
-                : tasks.filter(task => (task.bucket_id ?? task.section_id) == bucket.id);
+            const bucketTasks = tasks.filter(task => (task.bucket_id ?? task.section_id) == bucket.id);
             const filteredTasks = this._filterTasksByLabel(bucketTasks, labelFilter);
             return {
                 ...bucket,
